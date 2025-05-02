@@ -4,6 +4,7 @@ import akka.actor.typed._
 import akka.actor.typed.scaladsl._
 
 import scala.concurrent.duration._
+import scala.util.{Failure, Success, Try}
 
 object Transactor {
 
@@ -31,7 +32,7 @@ object Transactor {
     *                       terminating the session
     */
   def apply[T](value: T, sessionTimeout: FiniteDuration): Behavior[Command[T]] =
-      ???
+    SelectiveReceive[Command[T]](30, idle(value, sessionTimeout).narrow)
 
   /**
     * @return A behavior that defines how to react to any [[PrivateCommand]] when the transactor
@@ -54,7 +55,18 @@ object Transactor {
     *   - Messages other than [[Begin]] should not change the behavior.
     */
   private def idle[T](value: T, sessionTimeout: FiniteDuration): Behavior[PrivateCommand[T]] =
-    ???
+    Behaviors.receive {
+      case (ctx, Begin(actor)) =>
+        println(s"!!!!!!!receive Begin:${actor}")
+        val childSession = ctx.spawnAnonymous(sessionHandler(value, ctx.self, Set.empty[Long]))
+        ctx.watch(childSession)
+        ctx.scheduleOnce(sessionTimeout, ctx.self, RolledBack(childSession))
+        actor ! childSession
+        inSession(value, sessionTimeout, childSession)
+      case (_, other) =>
+        println(s"!!!!!!receive Other")
+        Behaviors.same
+    }
 
   /**
     * @return A behavior that defines how to react to [[PrivateCommand]] messages when the transactor has
@@ -67,7 +79,20 @@ object Transactor {
     * @param sessionRef Reference to the child [[Session]] actor
     */
   private def inSession[T](rollbackValue: T, sessionTimeout: FiniteDuration, sessionRef: ActorRef[Session[T]]): Behavior[PrivateCommand[T]] =
-    ???
+    Behaviors.receive { case (ctx, msg) =>
+      msg match {
+        case Committed(childSession, value) if childSession == sessionRef =>
+          idle(value, sessionTimeout)
+        case RolledBack(childSession) if childSession == sessionRef =>
+//          ctx.unwatch(childSession)
+          ctx.stop(childSession)
+          idle(rollbackValue, sessionTimeout)
+        case Terminated(ref) if ref == sessionRef =>
+          ctx.self ! RolledBack(sessionRef)
+          Behaviors.same
+        case _ => Behaviors.unhandled
+      }
+    }
 
   /**
     * @return A behavior handling [[Session]] messages. See in the instructions
@@ -77,7 +102,40 @@ object Transactor {
     * @param commit Parent actor reference, to send the [[Committed]] message to
     * @param done Set of already applied [[Modify]] messages
     */
-  private def sessionHandler[T](currentValue: T, commit: ActorRef[Committed[T]], done: Set[Long]): Behavior[Session[T]] =
-      ???
+  private def sessionHandler[T](currentValue: T, commit: ActorRef[PrivateCommand[T]], done: Set[Long]): Behavior[Session[T]] =
+    Behaviors.receive { case (ctx, msg) =>
+      msg match {
+        case Extract(f, replyTo) =>
+          Try(f(currentValue)) match {
+            case Failure(_) =>
+              ctx.self ! Rollback()
+              Behaviors.same
+            case Success(value) =>
+              replyTo ! value
+              Behaviors.same
+          }
+        case Modify(f, id, reply, replyTo) =>
+          if (done.contains(id)) {
+            replyTo ! reply
+            Behaviors.same
+          } else {
+            Try(f(currentValue)) match {
+              case Failure(_) =>
+                ctx.self ! Rollback()
+                Behaviors.same
+              case Success(value) =>
+                replyTo ! reply
+                sessionHandler(value, commit, done + id)
+            }
+          }
+        case Commit(reply, replyTo) =>
+          commit ! Committed(ctx.self, currentValue)
+          replyTo ! reply
+          Behaviors.stopped
+        case Rollback() =>
+          commit ! RolledBack(ctx.self)
+          Behaviors.stopped
+      }
+    }
 
 }

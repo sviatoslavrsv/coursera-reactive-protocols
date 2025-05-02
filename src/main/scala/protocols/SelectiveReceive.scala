@@ -24,7 +24,6 @@ object SelectiveReceive {
   def apply[T: ClassTag](bufferCapacity: Int, initialBehavior: Behavior[T]): Behavior[T] = Behaviors.withStash[T](bufferCapacity) { buff =>
     intercept(bufferCapacity, buff, validateAsInitial(initialBehavior))
   }
-
   /**
    * @return A behavior that interprets the incoming messages with the supplied `started`
    *         behavior to compute the next behavior. If the message has been unhandled, it
@@ -48,13 +47,13 @@ object SelectiveReceive {
       // “unstash-ing” all the stashed messages to the next behavior wrapped in an `SelectiveReceive`
       // interceptor.
       val next = interpretMessage(started, ctx, message)
-      if (isUnhandled(started)) {
+      if (isUnhandled(next)) {
+        if (buffer.isFull) throw new StashOverflowException("buffer is full")
         buffer.stash(message)
         Behaviors.same
       } else {
         val canonicalized = canonicalize(next, started, ctx)
-        val unstashed = buffer.unstashAll(canonicalized)
-        SelectiveReceive(bufferSize, unstashed)
+        buffer.unstashAll(SelectiveReceive(bufferSize, canonicalized))
       }
     }
 
