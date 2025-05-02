@@ -57,15 +57,12 @@ object Transactor {
   private def idle[T](value: T, sessionTimeout: FiniteDuration): Behavior[PrivateCommand[T]] =
     Behaviors.receive {
       case (ctx, Begin(actor)) =>
-        println(s"!!!!!!!receive Begin:${actor}")
         val childSession = ctx.spawnAnonymous(sessionHandler(value, ctx.self, Set.empty[Long]))
-        ctx.watch(childSession)
+        ctx.watchWith(childSession, RolledBack(childSession))
         ctx.scheduleOnce(sessionTimeout, ctx.self, RolledBack(childSession))
         actor ! childSession
         inSession(value, sessionTimeout, childSession)
-      case (_, other) =>
-        println(s"!!!!!!receive Other")
-        Behaviors.same
+      case _ => Behaviors.same
     }
 
   /**
@@ -84,12 +81,8 @@ object Transactor {
         case Committed(childSession, value) if childSession == sessionRef =>
           idle(value, sessionTimeout)
         case RolledBack(childSession) if childSession == sessionRef =>
-//          ctx.unwatch(childSession)
           ctx.stop(childSession)
           idle(rollbackValue, sessionTimeout)
-        case Terminated(ref) if ref == sessionRef =>
-          ctx.self ! RolledBack(sessionRef)
-          Behaviors.same
         case _ => Behaviors.unhandled
       }
     }
@@ -133,7 +126,6 @@ object Transactor {
           replyTo ! reply
           Behaviors.stopped
         case Rollback() =>
-          commit ! RolledBack(ctx.self)
           Behaviors.stopped
       }
     }
